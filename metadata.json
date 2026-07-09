@@ -1,0 +1,6 @@
+{
+  "name": "ShopSphere",
+  "description": "A modern, premium Full-Stack E-Commerce platform with Customer and Admin panels, real-time analytics, order tracking, and custom styling.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
