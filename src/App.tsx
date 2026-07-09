@@ -15,6 +15,7 @@ import AuthView from './views/AuthView';
 // API Client & Types
 import { api } from './lib/api';
 import { Product, Category, Coupon, Banner, Order, User } from './types';
+import { auth, onAuthStateChanged, signOut } from './lib/firebase';
 
 export default function App() {
   // Navigation
@@ -46,11 +47,35 @@ export default function App() {
   useEffect(() => {
     fetchGlobalData();
 
-    // Session cache loading
-    const cachedUser = localStorage.getItem('shopsphere_user');
-    if (cachedUser) {
-      setCurrentUser(JSON.parse(cachedUser));
+    // Load theme
+    const cachedTheme = localStorage.getItem('shopsphere_theme') as 'light' | 'dark' || 'light';
+    setTheme(cachedTheme);
+    if (cachedTheme === 'dark') {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
     }
+
+    // Real-time Firebase Auth state subscriber with MongoDB profile synchronization
+    const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
+      if (fbUser) {
+        try {
+          const syncedUser = await api.firebaseSync({
+            uid: fbUser.uid,
+            email: fbUser.email || '',
+            name: fbUser.displayName || undefined,
+            avatar: fbUser.photoURL || undefined
+          });
+          setCurrentUser(syncedUser);
+          localStorage.setItem('shopsphere_user', JSON.stringify(syncedUser));
+        } catch (err) {
+          console.error('Failed to synchronize authenticated profile with MongoDB:', err);
+        }
+      } else {
+        setCurrentUser(null);
+        localStorage.removeItem('shopsphere_user');
+      }
+    });
 
     const cachedCart = localStorage.getItem('shopsphere_cart');
     if (cachedCart) {
@@ -62,14 +87,7 @@ export default function App() {
       setWishlist(JSON.parse(cachedWish));
     }
 
-    // Load theme
-    const cachedTheme = localStorage.getItem('shopsphere_theme') as 'light' | 'dark' || 'light';
-    setTheme(cachedTheme);
-    if (cachedTheme === 'dark') {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
+    return () => unsubscribe();
   }, []);
 
   const fetchGlobalData = async () => {
@@ -116,7 +134,12 @@ export default function App() {
     localStorage.setItem('shopsphere_user', JSON.stringify(user));
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+    } catch (err) {
+      console.error('Error signing out from Firebase Auth:', err);
+    }
     setCurrentUser(null);
     localStorage.removeItem('shopsphere_user');
     navigateTo('home');
@@ -216,6 +239,37 @@ export default function App() {
     fetchGlobalData();
     return placedOrder;
   };
+
+  // Handle Stripe Redirection Callback (Success/Cancel URL)
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const paymentSuccess = urlParams.get('payment_success');
+    const orderId = urlParams.get('order_id');
+    const paymentCancel = urlParams.get('payment_cancel');
+
+    if (paymentSuccess === 'true' && orderId) {
+      const finalizePayment = async () => {
+        try {
+          // Sync with server to set paymentStatus to Paid
+          await api.updateOrder(orderId, { paymentStatus: 'Paid' });
+          handleClearCart();
+          await fetchGlobalData();
+          navigateTo('dashboard');
+          
+          // Clear query params elegantly
+          const newUrl = window.location.pathname;
+          window.history.replaceState({}, document.title, newUrl);
+        } catch (err) {
+          console.error('Failed to complete Stripe order payment validation:', err);
+        }
+      };
+      finalizePayment();
+    } else if (paymentCancel === 'true' && orderId) {
+      navigateTo('cart');
+      const newUrl = window.location.pathname;
+      window.history.replaceState({}, document.title, newUrl);
+    }
+  }, []);
 
   // Cart item model sync
   const cartCount = cartItems.reduce((acc, item) => acc + item.quantity, 0);

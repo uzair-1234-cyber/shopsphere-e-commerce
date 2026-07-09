@@ -24,6 +24,8 @@ export const api = {
   // Auth
   register: (data: any) => request<User>('/auth/register', { method: 'POST', body: JSON.stringify(data) }),
   login: (data: any) => request<User>('/auth/login', { method: 'POST', body: JSON.stringify(data) }),
+  firebaseSync: (data: { uid: string; email: string; name?: string; avatar?: string }) =>
+    request<User>('/auth/firebase-sync', { method: 'POST', body: JSON.stringify(data) }),
   updateProfile: (data: { userId: string; name?: string; email?: string; avatar?: string; addresses?: any[] }) =>
     request<User>('/auth/profile', { method: 'PUT', body: JSON.stringify(data) }),
 
@@ -57,6 +59,8 @@ export const api = {
   createOrder: (data: any) => request<Order>('/orders', { method: 'POST', body: JSON.stringify(data) }),
   updateOrder: (id: string, data: { orderStatus?: string; paymentStatus?: string }) =>
     request<Order>(`/orders/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  createStripeSession: (data: { orderId: string; totalPrice: number; origin: string }) =>
+    request<{ url: string | null; message?: string }>('/checkout/create-session', { method: 'POST', body: JSON.stringify(data) }),
 
   // Banners
   getBanners: () => request<Banner[]>('/banners'),

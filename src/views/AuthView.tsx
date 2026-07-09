@@ -1,6 +1,15 @@
 import React, { useState } from 'react';
 import { Mail, Lock, User, ShieldAlert, ShoppingBag, ArrowRight } from 'lucide-react';
 import Logo from '../components/Logo';
+import {
+  auth,
+  googleProvider,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signInWithPopup,
+  fbUpdateProfile,
+} from '../lib/firebase';
+import { api } from '../lib/api';
 
 interface AuthViewProps {
   onLoginSuccess: (user: any) => void;
@@ -11,7 +20,7 @@ interface AuthViewProps {
 export default function AuthView({ onLoginSuccess, onNavigate, initialMode = 'login' }: AuthViewProps) {
   const [mode, setMode] = useState<'login' | 'register'>(initialMode);
   
-  // Registration form
+  // Registration / Login form
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -19,38 +28,6 @@ export default function AuthView({ onLoginSuccess, onNavigate, initialMode = 'lo
   // Statuses
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorText, setErrorText] = useState('');
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setErrorText('');
-    setIsSubmitting(true);
-
-    try {
-      const endpoint = mode === 'login' ? '/api/auth/login' : '/api/auth/register';
-      const body = mode === 'login' 
-        ? { email, password } 
-        : { name, email, password };
-
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-
-      const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data.error || 'Authentication failed');
-      }
-
-      onLoginSuccess(data);
-      triggerRedirect(data);
-    } catch (err: any) {
-      setErrorText(err.message || 'Server connection failed.');
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
 
   const triggerRedirect = (user: any) => {
     if (user.role === 'admin') {
@@ -60,27 +37,91 @@ export default function AuthView({ onLoginSuccess, onNavigate, initialMode = 'lo
     }
   };
 
-  const handleQuickLogin = async (role: 'customer' | 'admin') => {
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorText('');
+    setIsSubmitting(true);
+
+    try {
+      if (mode === 'register') {
+        if (!name.trim()) throw new Error('Please enter your full name');
+        // 1. Firebase Sign Up
+        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+        const fbUser = userCredential.user;
+        
+        // 2. Set Profile name in Firebase
+        await fbUpdateProfile(fbUser, { displayName: name });
+        
+        // 3. Sync profile to MongoDB
+        const syncedUser = await api.firebaseSync({
+          uid: fbUser.uid,
+          email: fbUser.email || email,
+          name: name,
+          avatar: `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(name)}`
+        });
+
+        onLoginSuccess(syncedUser);
+        triggerRedirect(syncedUser);
+      } else {
+        // 1. Firebase Sign In
+        const userCredential = await signInWithEmailAndPassword(auth, email, password);
+        const fbUser = userCredential.user;
+
+        // 2. Sync / retrieve profile from MongoDB
+        const syncedUser = await api.firebaseSync({
+          uid: fbUser.uid,
+          email: fbUser.email || email,
+          name: fbUser.displayName || undefined,
+          avatar: fbUser.photoURL || undefined
+        });
+
+        onLoginSuccess(syncedUser);
+        triggerRedirect(syncedUser);
+      }
+    } catch (err: any) {
+      console.error('Authentication Error:', err);
+      // Map Firebase auth errors to readable messages
+      let msg = err.message;
+      if (err.code === 'auth/email-already-in-use') {
+        msg = 'An account with this email address already exists.';
+      } else if (err.code === 'auth/weak-password') {
+        msg = 'Password should be at least 6 characters.';
+      } else if (err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
+        msg = 'Invalid email address or password combination.';
+      } else if (err.code === 'auth/operation-not-allowed' || (msg && msg.includes('operation-not-allowed'))) {
+        msg = 'SIGN_IN_PROVIDER_DISABLED';
+      }
+      setErrorText(msg);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleGoogleSignIn = async () => {
     setErrorText('');
     setIsSubmitting(true);
     try {
-      const payload = role === 'admin' 
-        ? { email: 'admin@shopsphere.com', password: 'adminpassword' }
-        : { email: 'customer@shopsphere.com', password: 'customerpassword' };
+      const userCredential = await signInWithPopup(auth, googleProvider);
+      const fbUser = userCredential.user;
 
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+      const syncedUser = await api.firebaseSync({
+        uid: fbUser.uid,
+        email: fbUser.email || '',
+        name: fbUser.displayName || undefined,
+        avatar: fbUser.photoURL || undefined
       });
 
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
-
-      onLoginSuccess(data);
-      triggerRedirect(data);
+      onLoginSuccess(syncedUser);
+      triggerRedirect(syncedUser);
     } catch (err: any) {
-      setErrorText(err.message);
+      console.error('Google Auth Error:', err);
+      if (err.code !== 'auth/popup-closed-by-user') {
+        let msg = err.message;
+        if (err.code === 'auth/operation-not-allowed' || (msg && msg.includes('operation-not-allowed'))) {
+          msg = 'SIGN_IN_PROVIDER_DISABLED';
+        }
+        setErrorText(msg || 'Google authentication failed.');
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -118,7 +159,7 @@ export default function AuthView({ onLoginSuccess, onNavigate, initialMode = 'lo
                   placeholder="e.g. Alex Johnson"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  className="w-full p-3 pl-10 bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-855 rounded-xl focus:ring-1 focus:ring-indigo-500 outline-none"
+                  className="w-full p-3 pl-10 bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-855 rounded-xl focus:ring-1 focus:ring-indigo-500 outline-none text-zinc-900 dark:text-white"
                 />
                 <User className="absolute left-3 top-3.5 h-4 w-4 text-zinc-400" />
               </div>
@@ -135,7 +176,7 @@ export default function AuthView({ onLoginSuccess, onNavigate, initialMode = 'lo
                 placeholder="customer@shopsphere.com"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="w-full p-3 pl-10 bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-855 rounded-xl focus:ring-1 focus:ring-indigo-500 outline-none"
+                className="w-full p-3 pl-10 bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-855 rounded-xl focus:ring-1 focus:ring-indigo-500 outline-none text-zinc-900 dark:text-white"
               />
               <Mail className="absolute left-3 top-3.5 h-4 w-4 text-zinc-400" />
             </div>
@@ -151,7 +192,7 @@ export default function AuthView({ onLoginSuccess, onNavigate, initialMode = 'lo
                 placeholder="••••••••"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full p-3 pl-10 bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-855 rounded-xl focus:ring-1 focus:ring-indigo-500 outline-none"
+                className="w-full p-3 pl-10 bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-855 rounded-xl focus:ring-1 focus:ring-indigo-500 outline-none text-zinc-900 dark:text-white"
               />
               <Lock className="absolute left-3 top-3.5 h-4 w-4 text-zinc-400" />
             </div>
@@ -159,18 +200,39 @@ export default function AuthView({ onLoginSuccess, onNavigate, initialMode = 'lo
 
           {/* Errors banner */}
           {errorText && (
-            <div className="p-3 bg-rose-50 dark:bg-rose-950/20 border border-rose-100 dark:border-rose-900 text-rose-700 dark:text-rose-400 rounded-xl flex items-start gap-1.5 leading-normal">
-              <ShieldAlert className="h-4 w-4 text-rose-500 shrink-0 mt-0.5" />
-              <span>{errorText}</span>
-            </div>
+            errorText === 'SIGN_IN_PROVIDER_DISABLED' ? (
+              <div className="p-4 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/60 rounded-2xl text-xs space-y-3" id="firebase-instructions">
+                <div className="flex items-start gap-2 text-amber-800 dark:text-amber-400 font-semibold leading-normal">
+                  <ShieldAlert className="h-4.5 w-4.5 text-amber-600 dark:text-amber-500 shrink-0 mt-0.5" />
+                  <span>Firebase Sign-In Method is Disabled</span>
+                </div>
+                <div className="text-zinc-600 dark:text-zinc-400 space-y-2 leading-relaxed">
+                  <p>To enable authentication, please enable <strong>Email/Password</strong> and <strong>Google</strong> sign-in providers in your Firebase console:</p>
+                  <ol className="list-decimal pl-5 space-y-1 text-[11px]">
+                    <li>Go to the <a href="https://console.firebase.google.com/" target="_blank" rel="noreferrer" className="text-indigo-600 dark:text-indigo-400 hover:underline font-semibold underline decoration-dotted">Firebase Console</a>.</li>
+                    <li>Select your project.</li>
+                    <li>Click <strong>Authentication</strong> on the left sidebar.</li>
+                    <li>Select the <strong>Sign-in method</strong> tab.</li>
+                    <li>Click <strong>Add new provider</strong>, choose <strong>Email/Password</strong>, and enable it.</li>
+                    <li>Click <strong>Add new provider</strong> again, choose <strong>Google</strong>, and enable it.</li>
+                  </ol>
+                  <p className="text-[10px] text-zinc-500 italic mt-1">Once enabled, retry logging in or signing up below.</p>
+                </div>
+              </div>
+            ) : (
+              <div className="p-3 bg-rose-50 dark:bg-rose-950/20 border border-rose-100 dark:border-rose-900 text-rose-700 dark:text-rose-400 rounded-xl flex items-start gap-1.5 leading-normal">
+                <ShieldAlert className="h-4 w-4 text-rose-500 shrink-0 mt-0.5" />
+                <span>{errorText}</span>
+              </div>
+            )
           )}
 
           <button
             type="submit"
             disabled={isSubmitting}
-            className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold uppercase tracking-wider transition-all hover:translate-y-[-1px] flex items-center justify-center space-x-1 shadow-md shadow-indigo-600/15"
+            className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold uppercase tracking-wider transition-all hover:translate-y-[-1px] flex items-center justify-center space-x-1 shadow-md shadow-indigo-600/15 disabled:opacity-50"
           >
-            <span>{mode === 'login' ? 'Sign In Securely' : 'Complete Registration'}</span>
+            <span>{isSubmitting ? 'Authenticating...' : (mode === 'login' ? 'Sign In Securely' : 'Complete Registration')}</span>
             <ArrowRight className="h-4 w-4" />
           </button>
         </form>
@@ -191,32 +253,15 @@ export default function AuthView({ onLoginSuccess, onNavigate, initialMode = 'lo
         {/* Divider */}
         <div className="relative border-t border-zinc-150 dark:border-zinc-800 my-4 text-center">
           <span className="absolute -top-2.5 left-1/2 -translate-x-1/2 px-3.5 bg-white dark:bg-zinc-900 text-[10px] text-zinc-400 uppercase font-bold tracking-wider">
-            Quick Sandbox Logins
+            Secure Federated Login
           </span>
         </div>
 
-        {/* Quick Sandbox Login Assist */}
-        <div className="grid grid-cols-2 gap-3">
-          <button
-            onClick={() => handleQuickLogin('customer')}
-            className="py-2.5 bg-zinc-50 dark:bg-zinc-800/40 hover:bg-zinc-100 dark:hover:bg-zinc-800 border border-zinc-200 dark:border-zinc-800 text-[11px] font-semibold text-zinc-700 dark:text-zinc-300 rounded-xl transition-all text-center"
-          >
-            Demo Customer
-          </button>
-          <button
-            onClick={() => handleQuickLogin('admin')}
-            className="py-2.5 bg-zinc-50 dark:bg-indigo-950/20 hover:bg-zinc-100 dark:hover:bg-indigo-950/40 border border-zinc-200 dark:border-indigo-950/60 text-[11px] font-semibold text-zinc-700 dark:text-indigo-400 rounded-xl transition-all text-center"
-          >
-            Demo Admin
-          </button>
-        </div>
-
-        {/* Google Mock */}
+        {/* Real Firebase Google Sign-In */}
         <button
-          onClick={() => {
-            alert('Google Single Sign-On is fully configured. In this sandbox demo, please use the standard "Quick Sandbox Logins" above to explore roles immediately.');
-          }}
-          className="w-full py-2.5 border border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-850 rounded-xl text-xs font-semibold flex items-center justify-center space-x-2 transition-colors"
+          onClick={handleGoogleSignIn}
+          disabled={isSubmitting}
+          className="w-full py-2.5 border border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-850 rounded-xl text-xs font-semibold flex items-center justify-center space-x-2 transition-colors disabled:opacity-50"
         >
           <svg className="h-4.5 w-4.5" viewBox="0 0 24 24">
             <path
